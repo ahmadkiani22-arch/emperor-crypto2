@@ -1,2 +1,366 @@
-# emperor-crypto2
-emperor-crypto2
+import os, textwrap, zipfile, json
+
+root = "/mnt/data/CandleVision_AI_Pro"
+os.makedirs(root + "/static", exist_ok=True)
+
+files = {
+"app.py": r'''
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import Optional
+import requests
+import math
+import statistics
+
+app = FastAPI(title="CandleVision AI Pro", version="0.1.0")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+BINANCE_BASE = "https://api.binance.com"
+
+class AnalyzeRequest(BaseModel):
+    symbol: str = "BTCUSDT"
+    interval: str = "15m"
+    limit: int = 250
+
+VALID_INTERVALS = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"}
+VALID_SYMBOL = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+def get_klines(symbol: str, interval: str, limit: int = 250):
+    symbol = symbol.upper().strip()
+    if not symbol or any(ch not in VALID_SYMBOL for ch in symbol):
+        raise HTTPException(400, "نماد نامعتبر است.")
+    if interval not in VALID_INTERVALS:
+        raise HTTPException(400, "تایم‌فریم پشتیبانی نمی‌شود.")
+    limit = max(60, min(int(limit), 1000))
+    try:
+        r = requests.get(
+            f"{BINANCE_BASE}/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=12,
+            headers={"User-Agent": "CandleVisionAIPro/0.1"}
+        )
+        r.raise_for_status()
+        raw = r.json()
+    except requests.RequestException:
+        raise HTTPException(502, "دریافت داده از منبع بازار ناموفق بود. اتصال یا دسترسی به API را بررسی کن.")
+    except ValueError:
+        raise HTTPException(502, "پاسخ منبع داده قابل‌خواندن نیست.")
+    if not isinstance(raw, list) or len(raw) < 60:
+        raise HTTPException(502, "داده کافی از منبع بازار دریافت نشد.")
+    return [{
+        "time": int(k[0] // 1000),
+        "open": float(k[1]), "high": float(k[2]), "low": float(k[3]),
+        "close": float(k[4]), "volume": float(k[5]),
+        "close_time": int(k[6] // 1000)
+    } for k in raw]
+
+def ichimoku(candles):
+    highs = [x["high"] for x in candles]
+    lows = [x["low"] for x in candles]
+    def midrange(end, period):
+        start = max(0, end-period+1)
+        return (max(highs[start:end+1]) + min(lows[start:end+1])) / 2
+    out = []
+    for i in range(len(candles)):
+        tenkan = midrange(i, 9) if i >= 8 else None
+        kijun = midrange(i, 26) if i >= 25 else None
+        span_b = midrange(i, 52) if i >= 51 else None
+        span_a = (tenkan + kijun)/2 if tenkan is not None and kijun is not None else None
+        out.append({"tenkan": tenkan, "kijun": kijun, "span_a": span_a, "span_b": span_b})
+    return out
+
+def find_pivots(candles, left=3, right=3):
+    highs, lows = [], []
+    for i in range(left, len(candles)-right):
+        h, l = candles[i]["high"], candles[i]["low"]
+        if all(h > candles[j]["high"] for j in range(i-left, i)) and all(h >= candles[j]["high"] for j in range(i+1, i+right+1)):
+            highs.append({"index": i, "price": h, "time": candles[i]["time"]})
+        if all(l < candles[j]["low"] for j in range(i-left, i)) and all(l <= candles[j]["low"] for j in range(i+1, i+right+1)):
+            lows.append({"index": i, "price": l, "time": candles[i]["time"]})
+    return highs, lows
+
+def candle_pattern(candles):
+    a, b = candles[-2], candles[-1]
+    body = abs(b["close"] - b["open"])
+    rng = max(b["high"] - b["low"], 1e-12)
+    upper = b["high"] - max(b["open"], b["close"])
+    lower = min(b["open"], b["close"]) - b["low"]
+    prev_body = abs(a["close"] - a["open"])
+    pattern = "الگوی مشخص و قوی شناسایی نشد"
+    if body/rng < 0.10:
+        pattern = "دوجی احتمالی"
+    elif lower >= body*2 and upper <= max(body*0.7, rng*0.05) and b["close"] > b["open"]:
+        pattern = "چکش/پین‌بار صعودی احتمالی"
+    elif upper >= body*2 and lower <= max(body*0.7, rng*0.05) and b["close"] < b["open"]:
+        pattern = "ستاره/پین‌بار نزولی احتمالی"
+    elif a["close"] < a["open"] and b["close"] > b["open"] and b["open"] <= a["close"] and b["close"] >= a["open"] and body > prev_body:
+        pattern = "پوشای صعودی"
+    elif a["close"] > a["open"] and b["close"] < b["open"] and b["open"] >= a["close"] and b["close"] <= a["open"] and body > prev_body:
+        pattern = "پوشای نزولی"
+    return {"name": pattern, "body_ratio": round(body/rng, 3), "upper_wick_ratio": round(upper/rng, 3), "lower_wick_ratio": round(lower/rng, 3)}
+
+def analyze(candles):
+    closes = [c["close"] for c in candles]
+    last = candles[-1]
+    prev = candles[-2]
+    ichi = ichimoku(candles)
+    ic = ichi[-1]
+    highs, lows = find_pivots(candles)
+    # A deliberately transparent baseline, not a trained forecasting model.
+    recent = closes[-8:]
+    momentum = (recent[-1] - recent[0]) / max(recent[0], 1e-12)
+    recent_range = statistics.mean([x["high"] - x["low"] for x in candles[-14:]])
+    pattern = candle_pattern(candles)
+    score = 0.0
+    reasons = []
+    if momentum > 0:
+        score += 0.25
+        reasons.append("شتاب ۸ کندل اخیر مثبت است")
+    elif momentum < 0:
+        score -= 0.25
+        reasons.append("شتاب ۸ کندل اخیر منفی است")
+    if ic["tenkan"] and ic["kijun"]:
+        if ic["tenkan"] > ic["kijun"]:
+            score += 0.20
+            reasons.append("تنکان‌سن بالاتر از کیجون‌سن است")
+        else:
+            score -= 0.20
+            reasons.append("تنکان‌سن پایین‌تر از کیجون‌سن است")
+    if ic["span_a"] and ic["span_b"]:
+        cloud_top, cloud_bottom = max(ic["span_a"], ic["span_b"]), min(ic["span_a"], ic["span_b"])
+        if last["close"] > cloud_top:
+            score += 0.20
+            reasons.append("قیمت بالای ابر کومو قرار دارد")
+        elif last["close"] < cloud_bottom:
+            score -= 0.20
+            reasons.append("قیمت پایین ابر کومو قرار دارد")
+        else:
+            reasons.append("قیمت داخل ابر کومو است")
+    if "صعودی" in pattern["name"] or pattern["name"] == "پوشای صعودی":
+        score += 0.15
+        reasons.append("الگوی کندلی با سوگیری صعودی شناسایی شد")
+    elif "نزولی" in pattern["name"] or pattern["name"] == "پوشای نزولی":
+        score -= 0.15
+        reasons.append("الگوی کندلی با سوگیری نزولی شناسایی شد")
+    direction = "صعودی" if score > 0.12 else ("نزولی" if score < -0.12 else "خنثی/نامشخص")
+    # These are heuristic scores, intentionally not represented as calibrated probabilities.
+    confidence = min(78, max(35, int(50 + abs(score)*45)))
+    close_est = last["close"] * (1 + max(-0.008, min(0.008, momentum * 0.35)))
+    range_est = max(recent_range, last["close"] * 0.001)
+    cloud_state = "داده ناکافی" if not ic["span_a"] or not ic["span_b"] else (
+        "بالای ابر" if last["close"] > max(ic["span_a"], ic["span_b"]) else
+        "پایین ابر" if last["close"] < min(ic["span_a"], ic["span_b"]) else "داخل ابر"
+    )
+    return {
+        "symbol": "", "interval": "", "last_price": last["close"],
+        "direction": direction, "heuristic_score": round(score, 3),
+        "confidence_label": "تخمین اولیه؛ هنوز کالیبره نشده",
+        "confidence_score": confidence,
+        "next_candle_estimate": {
+            "open": last["close"],
+            "high_zone": [round(max(last["close"], close_est) + range_est*0.2, 8), round(max(last["close"], close_est) + range_est, 8)],
+            "low_zone": [round(min(last["close"], close_est) - range_est, 8), round(min(last["close"], close_est) - range_est*0.2, 8)],
+            "close_estimate": round(close_est, 8)
+        },
+        "pattern": pattern,
+        "ichimoku": {
+            "tenkan": ic["tenkan"], "kijun": ic["kijun"],
+            "span_a": ic["span_a"], "span_b": ic["span_b"],
+            "price_vs_cloud": cloud_state
+        },
+        "trend_points": {"swing_highs": highs[-8:], "swing_lows": lows[-8:]},
+        "reasons": reasons,
+        "warnings": [
+            "این نسخه نمونه اولیه است؛ مدل یادگیری ماشین آموزش‌دیده و اعتبارسنجی‌شده نیست.",
+            "مقادیر سقف/کف محدوده‌های تقریبی مبتنی بر نوسان اخیرند و تضمین آماری ندارند.",
+            "آخرین کندل دریافتی ممکن است هنوز بسته نشده باشد؛ برای ارزیابی از کندل‌های بسته‌شده استفاده کن."
+        ]
+    }
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    with open("static/index.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": "0.1.0", "mode": "prototype"}
+
+@app.post("/api/analyze")
+def analyze_market(req: AnalyzeRequest):
+    candles = get_klines(req.symbol, req.interval, req.limit)
+    result = analyze(candles)
+    result["symbol"] = req.symbol.upper()
+    result["interval"] = req.interval
+    result["candles"] = candles
+    return result
+
+@app.post("/api/analyze-image")
+async def analyze_image(file: UploadFile = File(...)):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "لطفاً یک فایل تصویری ارسال کن.")
+    data = await file.read()
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(413, "حداکثر اندازه تصویر ۸ مگابایت است.")
+    # Vision processing is intentionally not faked: this endpoint validates upload only.
+    # Next implementation step: chart OCR/vision and alignment with exchange OHLCV data.
+    return {
+        "status": "received",
+        "filename": file.filename,
+        "bytes": len(data),
+        "message": "تصویر دریافت شد؛ تحلیل تصویری در این نسخه هنوز پیاده‌سازی نشده است. برای تحلیل فعلی از نماد و تایم‌فریم استفاده کن."
+    }
+''',
+"static/index.html": r'''
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CandleVision AI Pro</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1220;--card:#121d30;--line:#26364e;--text:#eaf1fb;--muted:#9eb0c8;--accent:#57d6b5}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#09101c,#111d30);color:var(--text);font-family:Tahoma,Arial,sans-serif}
+header{padding:24px 5vw;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+h1{font-size:clamp(22px,3vw,34px);margin:0 0 8px}p{color:var(--muted);line-height:1.8;margin:4px 0}
+.badge{border:1px solid #2e806e;color:var(--accent);padding:8px 12px;border-radius:999px;font-size:12px}
+main{max-width:1250px;margin:auto;padding:24px 5vw 48px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
+.card{background:rgba(18,29,48,.94);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 10px 30px #0002}
+.controls{grid-column:span 4}.summary{grid-column:span 8}.wide{grid-column:span 12}
+label{display:block;color:var(--muted);font-size:13px;margin:14px 0 7px}
+input,select,button{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0b1423;color:var(--text);font:inherit}
+button{background:var(--accent);color:#06251e;border:0;font-weight:bold;cursor:pointer;margin-top:18px}button:disabled{opacity:.55;cursor:wait}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}
+.metric{background:#0b1423;border:1px solid var(--line);padding:14px;border-radius:12px}.metric small{display:block;color:var(--muted);margin-bottom:8px}.metric strong{font-size:20px}
+.pill{display:inline-block;border-radius:8px;padding:6px 10px;background:#1e3046;margin:4px 0}
+ul{line-height:2;color:#d9e5f5;padding-right:20px}.warning{border-right:3px solid #e6b65b;padding:10px 14px;background:#2b2519;border-radius:8px;color:#f3dfb2;font-size:13px;line-height:1.8}
+#status{margin-top:12px;min-height:24px;color:var(--muted)}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse}td,th{text-align:right;padding:10px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--muted);font-weight:normal}
+@media(max-width:850px){.controls,.summary{grid-column:span 12}.metrics{grid-template-columns:1fr}.card{padding:16px}}
+</style></head>
+<body>
+<header><div><h1>🧠 CandleVision AI Pro</h1><p>آزمایشگاه تحلیل کندل، ایچیموکو و سناریوهای بازار</p></div><span class="badge">نسخه نمونه ۰.۱</span></header>
+<main><div class="grid">
+<section class="card controls">
+<h2>تنظیم تحلیل</h2>
+<label for="symbol">نماد بازار (نمونه: BTCUSDT)</label><input id="symbol" value="BTCUSDT" maxlength="24">
+<label for="interval">تایم‌فریم</label><select id="interval"><option>1m</option><option>5m</option><option selected>15m</option><option>30m</option><option>1h</option><option>4h</option><option>1d</option></select>
+<label for="limit">تعداد کندل‌های تاریخی</label><select id="limit"><option>100</option><option selected>250</option><option>500</option><option>1000</option></select>
+<button id="run" onclick="runAnalysis()">تحلیل بازار</button><div id="status">برای شروع، نماد و تایم‌فریم را انتخاب کن.</div>
+<hr style="border-color:var(--line);margin:22px 0">
+<h3>بارگذاری تصویر نمودار</h3><p>در این نسخه، دریافت فایل آماده است اما تشخیص تصویری هنوز فعال نشده.</p><input type="file" id="image" accept="image/*"><button onclick="uploadImage()" style="background:#263b54;color:#eaf1fb">ارسال تصویر</button><div id="imageStatus"></div>
+</section>
+<section class="card summary"><h2>خلاصه پیش‌بینی</h2><p>نتیجه تحلیل پس از دریافت داده در این بخش نمایش داده می‌شود.</p>
+<div class="metrics"><div class="metric"><small>جهت احتمالی</small><strong id="direction">—</strong></div><div class="metric"><small>آخرین قیمت</small><strong id="price">—</strong></div><div class="metric"><small>امتیاز ابتدای کار</small><strong id="score">—</strong></div></div>
+<div class="metrics"><div class="metric"><small>الگوی کندلی</small><strong id="pattern" style="font-size:16px">—</strong></div><div class="metric"><small>قیمت نسبت به ابر</small><strong id="cloud" style="font-size:16px">—</strong></div><div class="metric"><small>تخمین بسته‌شدن بعدی</small><strong id="closeEst">—</strong></div></div>
+<h3>دلایل مدل</h3><ul id="reasons"><li>هنوز تحلیلی انجام نشده است.</li></ul>
+<div class="warning">هشدار: این یک نمونه فنی اولیه است، نه سامانه معاملاتی اعتبارسنجی‌شده. امتیازها احتمال واقعی موفقیت نیستند و نباید به‌تنهایی مبنای معامله قرار گیرند.</div>
+</section>
+<section class="card wide"><h2>ایچیموکو و محدوده کندل بعدی</h2><div class="metrics">
+<div class="metric"><small>تنکان‌سن</small><strong id="tenkan">—</strong></div><div class="metric"><small>کیجون‌سن</small><strong id="kijun">—</strong></div><div class="metric"><small>سنکو A</small><strong id="spanA">—</strong></div>
+</div><div class="table-wrap"><table><thead><tr><th>متغیر</th><th>محدوده تخمینی</th></tr></thead><tbody id="zones"><tr><td colspan="2">پس از تحلیل نمایش داده می‌شود.</td></tr></tbody></table></div></section>
+<section class="card wide"><h2>کندل‌های اخیر</h2><div class="table-wrap"><table><thead><tr><th>زمان (Unix)</th><th>بازشدن</th><th>بالاترین</th><th>پایین‌ترین</th><th>بسته‌شدن</th><th>حجم</th></tr></thead><tbody id="candles"><tr><td colspan="6">داده‌ای دریافت نشده است.</td></tr></tbody></table></div></section>
+</div></main>
+<script>
+const fmt = n => (n===null||n===undefined||Number.isNaN(Number(n))) ? "—" : Number(n).toLocaleString("en-US",{maximumFractionDigits:8});
+async function runAnalysis(){
+ const btn=document.getElementById('run'), status=document.getElementById('status'); btn.disabled=true; status.textContent='در حال دریافت داده و تحلیل…';
+ try{
+  const res=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:document.getElementById('symbol').value,interval:document.getElementById('interval').value,limit:Number(document.getElementById('limit').value)})});
+  const d=await res.json(); if(!res.ok) throw new Error(d.detail||'خطا در تحلیل');
+  document.getElementById('direction').textContent=d.direction;
+  document.getElementById('price').textContent=fmt(d.last_price);
+  document.getElementById('score').textContent=d.heuristic_score+' / ±1';
+  document.getElementById('pattern').textContent=d.pattern.name;
+  document.getElementById('cloud').textContent=d.ichimoku.price_vs_cloud;
+  document.getElementById('closeEst').textContent=fmt(d.next_candle_estimate.close_estimate);
+  document.getElementById('tenkan').textContent=fmt(d.ichimoku.tenkan);
+  document.getElementById('kijun').textContent=fmt(d.ichimoku.kijun);
+  document.getElementById('spanA').textContent=fmt(d.ichimoku.span_a);
+  document.getElementById('reasons').innerHTML=(d.reasons.length?d.reasons:['شواهد کافی برای سوگیری مشخص وجود ندارد']).map(x=>'<li>'+x+'</li>').join('');
+  const z=d.next_candle_estimate;
+  document.getElementById('zones').innerHTML=[['قیمت بازشدن تخمینی',fmt(z.open)],['محدوده سقف تخمینی',fmt(z.high_zone[0])+' تا '+fmt(z.high_zone[1])],['محدوده کف تخمینی',fmt(z.low_zone[0])+' تا '+fmt(z.low_zone[1])],['بسته‌شدن تخمینی',fmt(z.close_estimate)]].map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]+'</td></tr>').join('');
+  document.getElementById('candles').innerHTML=d.candles.slice(-12).reverse().map(c=>'<tr><td>'+c.time+'</td><td>'+fmt(c.open)+'</td><td>'+fmt(c.high)+'</td><td>'+fmt(c.low)+'</td><td>'+fmt(c.close)+'</td><td>'+fmt(c.volume)+'</td></tr>').join('');
+  status.textContent='تحلیل تمام شد؛ '+d.symbol+' / '+d.interval+' — '+d.confidence_label;
+ }catch(e){status.textContent='خطا: '+e.message;}finally{btn.disabled=false;}
+}
+async function uploadImage(){
+ const f=document.getElementById('image').files[0], out=document.getElementById('imageStatus');
+ if(!f){out.textContent='ابتدا یک تصویر انتخاب کن.';return}
+ const fd=new FormData();fd.append('file',f);
+ try{const r=await fetch('/api/analyze-image',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw new Error(d.detail||'خطا');out.textContent=d.message+' ('+d.bytes+' بایت)';}
+ catch(e){out.textContent='خطا: '+e.message}
+}
+</script></body></html>
+''',
+"requirements.txt": """fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+requests>=2.31,<3.0
+python-multipart>=0.0.9
+""",
+".env.example": """# Prototype uses public market data only. No API keys are needed.
+# For future deployment, configure market-data providers via environment variables.
+""",
+".gitignore": """__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
+""",
+"README_FA.md": r'''
+# CandleVision AI Pro — نسخه نمونه ۰.۱
+
+این پروژه یک نمونه اولیه قابل اجرا برای داشبورد فارسی تحلیل بازار کریپتو است. در حال حاضر:
+- داده‌های کندلی را از endpoint عمومی Binance دریافت می‌کند.
+- چند الگوی کندلی پایه را با قواعد شفاف تشخیص می‌دهد.
+- مقادیر پایه ایچیموکو را محاسبه می‌کند.
+- نقاط چرخش احتمالی سقف/کف را استخراج می‌کند.
+- یک سوگیری ساده بر اساس مومنتوم، ایچیموکو و الگوی کندلی نمایش می‌دهد.
+- یک رابط فارسی سازگار با موبایل و دسکتاپ دارد.
+
+## محدودیت مهم
+این **مدل هوش مصنوعی آموزش‌دیده یا اعتبارسنجی‌شده نیست**. امتیاز نمایش‌داده‌شده احتمال موفقیت نیست. محدوده‌های سقف و کف، برآوردهای ابتدای کارند و تضمین آماری ندارند. endpoint تصویر فقط فایل را دریافت و اعتبارسنجی می‌کند؛ تشخیص واقعی نمودار از تصویر هنوز پیاده‌سازی نشده است. این نسخه سفارش معامله ثبت نمی‌کند.
+
+## اجرا روی کامپیوتر
+
+به Python 3.10 یا جدیدتر نیاز است.
+
+```bash
+python -m venv .venv
+```
+
+ویندوز:
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+macOS/Linux:
+```bash
+source .venv/bin/activate
+```
+
+سپس:
+```bash
+pip install -r requirements.txt
+uvicorn app:app --reload
+```
+
+در مرورگر باز کن:
+`http://127.0.0.1:8000`
+
+## اجرا روی گوشی
+برای استفاده روی گوشی، برنامه باید روی کامپیوتر یا سرور اجرا شود و از طریق شبکه یا دامنه امن به آن دسترسی داشته باشی. این بسته به‌تنهایی هنوز روی اینترنت منتشر نشده است.
+
+## APIهای نمونه
+- `GET /api/health`
+- `POST /api/analyze` با JSON مثل:
+  `{"symbol":"BTCUSDT","interval":"15m","limit":250}`
+- `POST /api/analyze-image` با فایل تصویر؛ فعلاً فقط دریافت فایل را بررسی می‌کند.
+
+## گام‌های توسعه بعدی
+1. جداکردن آخرین کندل ناتمام از ارزیابی.
+2. افزودن تست‌های واحد و داده‌های تاریخی قابل بازتولید.
+3. ساخت Prediction Lab با ثبت پیش‌بینی‌ها و نتایج واقعی.
+4. بک‌تست walk-forward و ارزیابی خارج از نمونه، با کارمزد و لغزش.
+5. تکمیل تحلیل تصویری با تشخیص کندل‌ها و تطبیق با داده عددی.
+6. افزودن منابع دا
