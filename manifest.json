@@ -1,0 +1,12 @@
+{
+  "name": "امپراتور تریدر",
+  "short_name": "امپراتور",
+  "lang": "fa",
+  "dir": "rtl",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f6fb",
+  "theme_color": "#172554",
+  "description": "تحلیل آزمایشی رمزارز با داده عمومی نوبیتکس",
+  "icons": []
+}

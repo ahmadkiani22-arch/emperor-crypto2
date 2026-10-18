@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#172554"><meta name="description" content="دستیار تحلیل رمزارز با داده عمومی نوبیتکس">
+<link rel="manifest" href="manifest.json">
+<title>امپراتور تریدر</title>
+<style>
+:root{--navy:#172554;--bg:#f3f6fb;--card:#fff;--ink:#172033;--muted:#667085;--green:#087443;--red:#b42318;--border:#e1e7f0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Tahoma,Arial,sans-serif;line-height:1.65}
+header{background:linear-gradient(135deg,#172554,#1d4ed8);color:#fff;padding:22px 18px 26px;border-radius:0 0 24px 24px}
+h1{margin:0;font-size:24px}header p{margin:6px 0 0;color:#dbeafe;font-size:13px}
+main{max-width:760px;margin:auto;padding:14px;display:grid;gap:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:17px;padding:16px;box-shadow:0 4px 18px #1e293b08}
+h2{font-size:17px;margin:0 0 12px}.fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{font-size:12px;color:var(--muted);display:block;margin-bottom:5px}select,input{width:100%;padding:12px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;font-size:15px;color:var(--ink)}
+button{border:0;border-radius:11px;padding:13px 15px;font-size:15px;font-weight:bold;cursor:pointer}
+.primary{background:var(--navy);color:#fff;width:100%;margin-top:12px}.secondary{background:#e8eefc;color:var(--navy);width:100%;margin-top:8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{background:#f8fafc;border:1px solid var(--border);border-radius:12px;padding:12px;min-width:0}.metric small{display:block;color:var(--muted);font-size:12px}.metric strong{font-size:17px;overflow-wrap:anywhere}
+.status{padding:10px 12px;border-radius:10px;background:#eef2ff;color:#3730a3;font-weight:bold}.status.buy{background:#ecfdf3;color:var(--green)}.status.sell{background:#fef3f2;color:var(--red)}
+ul{margin:8px 0;padding-right:20px}li{margin:5px 0}.muted{color:var(--muted);font-size:12px}.hidden{display:none}.warning{background:#fffaeb;border-color:#fedf89;color:#854d0e}
+footer{text-align:center;color:var(--muted);font-size:11px;padding:0 20px 22px}
+@media(max-width:390px){.fields,.grid{grid-template-columns:1fr 1fr}.metric strong{font-size:15px}}
+</style>
+</head>
+<body>
+<header><h1>👑 امپراتور تریدر</h1><p>تحلیل کمکی رمزارز · ایچیموکو + RSI + حجم · ضریب تعهدی ۲</p></header>
+<main>
+<section class="card">
+<h2>تنظیمات تحلیل</h2>
+<div class="fields">
+<div><label for="symbol">رمزارز</label><select id="symbol">
+<option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option><option>XRPUSDT</option><option>BNBUSDT</option><option>SUIUSDT</option><option>AVAXUSDT</option><option>BCHUSDT</option><option>DOGEUSDT</option><option>ADAUSDT</option></select></div>
+<div><label for="tf">تایم‌فریم</label><select id="tf"><option value="15">۱۵ دقیقه</option><option value="60">۱ ساعت</option><option value="240" selected>۴ ساعت</option></select></div>
+<div><label for="capital">سرمایه قابل اختصاص (تومان)</label><input id="capital" type="number" min="0" value="10000000"></div>
+<div><label for="risk">ریسک هر معامله (%)</label><input id="risk" type="number" min="0.1" max="2" step="0.1" value="1"></div>
+</div>
+<button class="primary" id="analyze">دریافت داده و تحلیل</button>
+<button class="secondary" id="install" hidden>افزودن به صفحه اصلی</button>
+<p class="muted">منبع قیمت: API عمومی نوبیتکس؛ بدون ورود به حساب و بدون ثبت سفارش.</p>
+</section>
+<section class="card">
+<h2>نتیجه تحلیل</h2><div id="status" class="status">برای شروع، «دریافت داده و تحلیل» را بزن.</div>
+<div class="grid" style="margin-top:10px">
+<div class="metric"><small>قیمت آخرین کندل</small><strong id="price">—</strong></div>
+<div class="metric"><small>RSI (۱۴)</small><strong id="rsi">—</strong></div>
+<div class="metric"><small>حجم / میانگین ۲۰ کندل</small><strong id="vol">—</strong></div>
+<div class="metric"><small>آخرین کندل</small><strong id="time" style="font-size:13px">—</strong></div>
+</div>
+<h2 style="margin-top:16px">برنامه احتمالی معامله</h2>
+<div class="grid">
+<div class="metric"><small>ورود</small><strong id="entry">—</strong></div><div class="metric"><small>حد ضرر</small><strong id="stop">—</strong></div>
+<div class="metric"><small>هدف اول (۱٫۵R)</small><strong id="t1">—</strong></div><div class="metric"><small>هدف دوم (۲R)</small><strong id="t2">—</strong></div>
+</div>
+<p id="position" class="muted">اندازه موقعیت پس از تأیید سیگنال محاسبه می‌شود.</p>
+<ul id="reasons"><li>تحلیل هنوز اجرا نشده است.</li></ul>
+<p id="err" class="muted"></p>
+</section>
+<section class="card warning"><b>هشدار مهم</b><p style="margin-bottom:0;font-size:13px">این ابزار آزمایشی است، سود را تضمین نمی‌کند و هنوز بک‌تست نشده است. سیگنال‌ها را با نمودار نوبیتکس بررسی کن. هزینه تعهدی، کارمزد، لغزش قیمت و لیکوییدشدن محاسبه نشده‌اند. اگر داده تازه یا کافی دریافت نشود، نباید معامله کنی.</p></section>
+</main>
+<footer>نسخه آزمایشی ۰٫۱ · تصمیم نهایی و مدیریت ریسک بر عهده کاربر است.</footer>
+<script src="app.js"></script>
+</body></html>
